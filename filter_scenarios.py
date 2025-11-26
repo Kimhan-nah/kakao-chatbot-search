@@ -7,7 +7,8 @@ import requests
 import json
 import sys
 import os
-from typing import List, Dict, Optional
+import re
+from typing import List, Dict, Optional, Tuple
 
 
 def load_env_file(env_path: str = '.env') -> None:
@@ -397,6 +398,170 @@ def display_block_id_search_results(env_results: Dict[str, Optional[Dict]], sear
     print("=" * 80)
 
 
+def parse_block_ids_from_text(text: str) -> List[Tuple[str, str, int]]:
+    """
+    YAML 형식의 텍스트에서 블록 ID를 파싱합니다.
+    
+    Args:
+        text: YAML 형식의 텍스트
+    
+    Returns:
+        (block_id, path, line_number) 튜플 리스트
+    """
+    block_ids = []
+    lines = text.split('\n')
+    path_stack = []  # 계층 구조 추적
+    # 블록 ID 패턴: 변수명: block_id # 주석 형식
+    # block_id는 24자리 16진수 문자열
+    block_id_pattern = re.compile(r'^(\s*)([a-zA-Z_][a-zA-Z0-9_]*):\s*([a-f0-9]{24})\s*(?:#.*)?$', re.IGNORECASE)
+    
+    for line_num, line in enumerate(lines, 1):
+        original_line = line
+        line = line.rstrip()
+        
+        # 빈 줄 건너뛰기
+        if not line.strip():
+            continue
+        
+        # 주석만 있는 줄 건너뛰기
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            continue
+        
+        # 블록 ID 패턴 매칭 (변수명: block_id # 주석 형식)
+        match = block_id_pattern.match(line)
+        if match:
+            indent = len(match.group(1))
+            var_name = match.group(2)
+            block_id = match.group(3)
+            
+            # 현재 들여쓰기 레벨에 맞게 path_stack 조정
+            while path_stack and path_stack[-1][1] >= indent:
+                path_stack.pop()
+            
+            # 경로 구성
+            if path_stack:
+                path = '.'.join([p[0] for p in path_stack] + [var_name])
+            else:
+                path = var_name
+            
+            path_stack.append((var_name, indent))
+            block_ids.append((block_id, path, line_num))
+        else:
+            # 블록 ID가 아닌 키-값 쌍인 경우 (예: hsptlzInfo: # 입원 확인)
+            # 경로 스택에 추가만 하고 블록 ID는 추가하지 않음
+            key_value_pattern = re.compile(r'^(\s*)([a-zA-Z_][a-zA-Z0-9_]*):\s*(?:#.*)?$')
+            key_match = key_value_pattern.match(line)
+            if key_match:
+                indent = len(key_match.group(1))
+                var_name = key_match.group(2)
+                
+                # 현재 들여쓰기 레벨에 맞게 path_stack 조정
+                while path_stack and path_stack[-1][1] >= indent:
+                    path_stack.pop()
+                
+                path_stack.append((var_name, indent))
+    
+    return block_ids
+
+
+def validate_block_ids(block_ids: List[Tuple[str, str, int]], 
+                       scenarios: List[Dict], 
+                       env_name: str) -> List[Dict]:
+    """
+    블록 ID 목록이 해당 환경에서 유효한지 검증합니다.
+    
+    Args:
+        block_ids: (block_id, path, line_number) 튜플 리스트
+        scenarios: 시나리오 리스트
+        scenarios: 환경 이름
+    
+    Returns:
+        검증 결과 리스트
+    """
+    # 모든 블록 ID를 딕셔너리로 변환 (빠른 검색을 위해)
+    all_blocks = {}
+    for scenario in scenarios:
+        scenario_id = scenario.get('id', 'N/A')
+        scenario_name = scenario.get('name', 'N/A')
+        items = scenario.get('items', [])
+        
+        for item in items:
+            block_id = item.get('id', 'N/A')
+            block_name = item.get('name', 'N/A')
+            all_blocks[block_id] = {
+                'scenario_id': scenario_id,
+                'scenario_name': scenario_name,
+                'block_name': block_name
+            }
+    
+    # 검증 결과
+    results = []
+    for block_id, path, line_num in block_ids:
+        if block_id in all_blocks:
+            block_info = all_blocks[block_id]
+            results.append({
+                'block_id': block_id,
+                'path': path,
+                'line_number': line_num,
+                'valid': True,
+                'scenario_id': block_info['scenario_id'],
+                'scenario_name': block_info['scenario_name'],
+                'block_name': block_info['block_name']
+            })
+        else:
+            results.append({
+                'block_id': block_id,
+                'path': path,
+                'line_number': line_num,
+                'valid': False,
+                'scenario_id': None,
+                'scenario_name': None,
+                'block_name': None
+            })
+    
+    return results
+
+
+def display_validation_results(results: List[Dict], env_name: str):
+    """
+    검증 결과를 출력합니다.
+    
+    Args:
+        results: 검증 결과 리스트
+        env_name: 환경 이름
+    """
+    valid_count = sum(1 for r in results if r['valid'])
+    invalid_count = len(results) - valid_count
+    
+    print(f"\n[{env_name.upper()}] 블록 ID 검증 결과")
+    print("=" * 80)
+    print(f"총 {len(results)}개 중 유효: {valid_count}개, 무효: {invalid_count}개\n")
+    
+    # 유효한 블록들
+    if valid_count > 0:
+        print("✓ 유효한 블록 ID:")
+        print("-" * 80)
+        for result in results:
+            if result['valid']:
+                print(f"  [{result['line_number']:3d}] {result['path']}")
+                print(f"       블록 ID: {result['block_id']}")
+                print(f"       시나리오: {result['scenario_name']} | 블록: {result['block_name']}")
+                print()
+    
+    # 무효한 블록들
+    if invalid_count > 0:
+        print("✗ 무효한 블록 ID:")
+        print("-" * 80)
+        for result in results:
+            if not result['valid']:
+                print(f"  [{result['line_number']:3d}] {result['path']}")
+                print(f"       블록 ID: {result['block_id']} - 해당 환경에서 찾을 수 없음")
+                print()
+    
+    print("=" * 80)
+
+
 def display_search_results_multi_env(env_results: Dict[str, List[Dict]]):
     """
     여러 환경의 검색 결과를 비교하여 출력합니다.
@@ -567,6 +732,7 @@ def main():
         print("  3 - STG 환경 전체 시나리오 출력")
         print("  4 - 환경별 시나리오 비교")
         print("  5 - 블록 검색 모드 (DEV, PROD, STG 모든 환경)")
+        print("  6 - 블록 ID 검증 (YAML 형식 텍스트)")
         print("=" * 80)
     
     print_menu()
@@ -706,8 +872,106 @@ def main():
                         print_menu()
                         break
             
+            # 6. 블록 ID 검증
+            elif user_input == "6":
+                print("\n[블록 ID 검증 모드]")
+                print("YAML 형식의 텍스트를 입력하세요. (입력 완료 후 빈 줄에서 Enter를 두 번 누르세요)")
+                print("예시:")
+                print("  hsptlzInfo: # 입원 확인")
+                print("    hsplzInfoInquiry: 67d2804ef38a8bfdf0172bce # 입원정보조회")
+                print("-" * 80)
+                
+                # 여러 줄 입력 받기
+                lines = []
+                empty_line_count = 0
+                print("\n텍스트 입력 (빈 줄 두 번으로 종료):")
+                try:
+                    while True:
+                        line = input()
+                        if not line.strip():
+                            empty_line_count += 1
+                            if empty_line_count >= 2:
+                                break
+                        else:
+                            empty_line_count = 0
+                            lines.append(line)
+                except KeyboardInterrupt:
+                    print("\n입력이 취소되었습니다.")
+                    print_menu()
+                    continue
+                
+                if not lines:
+                    print("입력된 텍스트가 없습니다.")
+                    print_menu()
+                    continue
+                
+                # 텍스트 파싱
+                text = '\n'.join(lines)
+                try:
+                    block_ids = parse_block_ids_from_text(text)
+                    
+                    if not block_ids:
+                        print("⚠️  블록 ID를 찾을 수 없습니다. 형식을 확인해주세요.")
+                        print_menu()
+                        continue
+                    
+                    print(f"\n✓ {len(block_ids)}개의 블록 ID를 찾았습니다.")
+                    
+                    # 환경 선택
+                    print("\n검증할 환경을 선택하세요:")
+                    print("  1 - DEV")
+                    print("  2 - PROD")
+                    print("  3 - STG")
+                    
+                    env_name = None
+                    try:
+                        while True:
+                            env_choice = input("\n환경 선택 (1/2/3)> ").strip()
+                            
+                            if env_choice == "1":
+                                env_name = 'dev'
+                                break
+                            elif env_choice == "2":
+                                env_name = 'prod'
+                                break
+                            elif env_choice == "3":
+                                env_name = 'stg'
+                                break
+                            else:
+                                print("1, 2, 3 중 하나를 입력하세요.")
+                    except KeyboardInterrupt:
+                        print("\n취소되었습니다.")
+                        print_menu()
+                        continue
+                    
+                    if env_name:
+                        # 선택한 환경 데이터 로드
+                        if env_name not in env_scenarios:
+                            env_config = environments[env_name]
+                            cookie = os.getenv(env_config['cookie_key'])
+                            if env_name == 'dev' and not cookie:
+                                cookie = os.getenv('KAKAO_COOKIE')  # 하위 호환성
+                            scenarios = load_environment_data(env_name, env_config['url'], cookie)
+                            if scenarios:
+                                env_scenarios[env_name] = scenarios
+                        
+                        if env_name in env_scenarios:
+                            # 검증 수행
+                            results = validate_block_ids(block_ids, env_scenarios[env_name], env_name)
+                            display_validation_results(results, env_name)
+                        else:
+                            print(f"⚠️  {env_name.upper()} 환경 데이터를 로드할 수 없습니다.")
+                    
+                    print_menu()
+                
+                except Exception as e:
+                    print(f"❌ 오류 발생: {e}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                    print_menu()
+            
             else:
-                print("잘못된 명령어입니다. 0, 1, 2, 3, 4, 5 중 하나를 입력하세요.")
+                print("잘못된 명령어입니다. 0, 1, 2, 3, 4, 5, 6 중 하나를 입력하세요.")
                 print_menu()
         
         except KeyboardInterrupt:
