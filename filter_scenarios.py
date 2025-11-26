@@ -216,13 +216,93 @@ def display_search_results(results: List[Dict]):
         print("-" * 80)
 
 
+def search_blocks_by_id(scenarios: List[Dict], block_id: str) -> Optional[Dict]:
+    """
+    블록 ID로 블록을 검색합니다.
+    
+    Args:
+        scenarios: 시나리오 리스트
+        block_id: 검색할 블록 ID
+    
+    Returns:
+        찾은 블록 정보 또는 None
+    """
+    for scenario in scenarios:
+        scenario_id = scenario.get('id', 'N/A')
+        scenario_name = scenario.get('name', 'N/A')
+        items = scenario.get('items', [])
+        
+        for item in items:
+            if item.get('id') == block_id:
+                return {
+                    'scenario_id': scenario_id,
+                    'scenario_name': scenario_name,
+                    'block_id': block_id,
+                    'block_name': item.get('name', 'N/A')
+                }
+    
+    return None
+
+
+def find_matching_blocks_in_other_envs(env_scenarios: Dict[str, List[Dict]], 
+                                        source_env: str, 
+                                        scenario_name: str, 
+                                        block_name: str) -> Dict[str, Optional[Dict]]:
+    """
+    다른 환경에서 동일한 시나리오의 블록을 찾습니다.
+    
+    Args:
+        env_scenarios: 환경별 시나리오 딕셔너리
+        source_env: 원본 환경 이름
+        scenario_name: 시나리오 이름
+        block_name: 블록 이름
+    
+    Returns:
+        환경별 블록 정보 딕셔너리 {env_name: block_info or None}
+    """
+    results = {}
+    
+    for env_name, scenarios in env_scenarios.items():
+        if not scenarios:
+            results[env_name] = None
+            continue
+        
+        # 같은 시나리오 이름 찾기
+        matching_scenario = None
+        for scenario in scenarios:
+            if scenario.get('name') == scenario_name:
+                matching_scenario = scenario
+                break
+        
+        if not matching_scenario:
+            results[env_name] = None
+            continue
+        
+        # 같은 블록 이름 찾기
+        items = matching_scenario.get('items', [])
+        matching_block = None
+        for item in items:
+            if item.get('name') == block_name:
+                matching_block = {
+                    'scenario_id': matching_scenario.get('id', 'N/A'),
+                    'scenario_name': scenario_name,
+                    'block_id': item.get('id', 'N/A'),
+                    'block_name': block_name
+                }
+                break
+        
+        results[env_name] = matching_block
+    
+    return results
+
+
 def search_blocks_multi_env(env_scenarios: Dict[str, List[Dict]], search_term: str) -> Dict[str, List[Dict]]:
     """
     여러 환경에서 블록을 검색합니다.
     
     Args:
         env_scenarios: 환경별 시나리오 딕셔너리 {env_name: scenarios}
-        search_term: 검색어
+        search_term: 검색어 (블록 이름 또는 블록 ID)
     
     Returns:
         환경별 검색 결과 딕셔너리 {env_name: results}
@@ -236,6 +316,85 @@ def search_blocks_multi_env(env_scenarios: Dict[str, List[Dict]], search_term: s
             results[env_name] = []
     
     return results
+
+
+def search_by_block_id_multi_env(env_scenarios: Dict[str, List[Dict]], block_id: str) -> Dict[str, Optional[Dict]]:
+    """
+    여러 환경에서 블록 ID로 검색하고, 다른 환경의 동일 블록을 찾습니다.
+    
+    Args:
+        env_scenarios: 환경별 시나리오 딕셔너리
+        block_id: 검색할 블록 ID
+    
+    Returns:
+        환경별 블록 정보 딕셔너리 {env_name: block_info or None}
+    """
+    # 모든 환경에서 해당 block id 찾기
+    found_blocks = {}
+    source_info = None
+    
+    for env_name, scenarios in env_scenarios.items():
+        if scenarios:
+            block_info = search_blocks_by_id(scenarios, block_id)
+            found_blocks[env_name] = block_info
+            if block_info and source_info is None:
+                source_info = block_info
+                source_info['env'] = env_name
+        else:
+            found_blocks[env_name] = None
+    
+    # source_info가 있으면, 다른 환경에서 같은 시나리오의 같은 블록 찾기
+    if source_info:
+        scenario_name = source_info['scenario_name']
+        block_name = source_info['block_name']
+        
+        # 다른 환경에서 매칭되는 블록 찾기
+        matching_blocks = find_matching_blocks_in_other_envs(
+            env_scenarios, 
+            source_info['env'], 
+            scenario_name, 
+            block_name
+        )
+        
+        # 찾은 블록과 매칭된 블록 병합
+        for env_name in matching_blocks:
+            if matching_blocks[env_name] and not found_blocks[env_name]:
+                found_blocks[env_name] = matching_blocks[env_name]
+    
+    return found_blocks
+
+
+def display_block_id_search_results(env_results: Dict[str, Optional[Dict]], search_block_id: str):
+    """
+    블록 ID 검색 결과를 출력합니다.
+    
+    Args:
+        env_results: 환경별 블록 정보 딕셔너리
+        search_block_id: 검색한 블록 ID
+    """
+    found_count = sum(1 for result in env_results.values() if result is not None)
+    
+    if found_count == 0:
+        print(f"블록 ID '{search_block_id}'를 찾을 수 없습니다.")
+        return
+    
+    # 첫 번째로 찾은 블록 정보
+    first_result = next((result for result in env_results.values() if result), None)
+    if first_result:
+        print(f"\n블록 ID '{search_block_id}' 검색 결과:")
+        print(f"시나리오: {first_result['scenario_name']}")
+        print(f"블록 Name: {first_result['block_name']}")
+        print("=" * 80)
+    
+    for env_name in ['dev', 'prod', 'stg']:
+        if env_name in env_results:
+            result = env_results[env_name]
+            if result:
+                print(f"[{env_name.upper()}] 시나리오 ID: {result['scenario_id']} | 블록 ID: {result['block_id']}")
+            else:
+                print(f"[{env_name.upper()}] 없음")
+    
+    print("=" * 80)
 
 
 def display_search_results_multi_env(env_results: Dict[str, List[Dict]]):
@@ -494,12 +653,13 @@ def main():
                     print_menu()
                     continue
                 
-                print("\n[검색 모드] 블록 이름으로 검색합니다. (DEV, PROD, STG 모든 환경)")
+                print("\n[검색 모드] 블록 이름 또는 블록 ID로 검색합니다. (DEV, PROD, STG 모든 환경)")
                 
                 def print_search_menu():
                     print("-" * 80)
                     print("검색 모드 안내:")
-                    print("  - 블록 이름으로 검색합니다 (DEV, PROD, STG 모든 환경)")
+                    print("  - 블록 이름으로 검색: 블록 이름의 일부를 입력")
+                    print("  - 블록 ID로 검색: 정확한 블록 ID를 입력 (다른 환경의 동일 블록도 자동 검색)")
                     print("  - 0 또는 exit - 검색 모드 종료")
                     print("-" * 80)
                 
@@ -516,10 +676,26 @@ def main():
                             print_menu()
                             break
                         
-                        # 검색어로 모든 환경에서 블록 필터링
+                        # 검색어로 검색
                         if search_input:
-                            env_results = search_blocks_multi_env(env_scenarios, search_input)
-                            display_search_results_multi_env(env_results)
+                            # 먼저 block ID로 검색 시도 (모든 환경에서)
+                            block_id_found = False
+                            for env_name, scenarios in env_scenarios.items():
+                                if scenarios:
+                                    block_info = search_blocks_by_id(scenarios, search_input)
+                                    if block_info:
+                                        block_id_found = True
+                                        break
+                            
+                            if block_id_found:
+                                # Block ID 검색 모드
+                                env_results = search_by_block_id_multi_env(env_scenarios, search_input)
+                                display_block_id_search_results(env_results, search_input)
+                            else:
+                                # 블록 이름 검색 모드
+                                env_results = search_blocks_multi_env(env_scenarios, search_input)
+                                display_search_results_multi_env(env_results)
+                            
                             print_search_menu()
                         else:
                             print("검색어를 입력하세요.")
